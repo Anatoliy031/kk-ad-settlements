@@ -14,20 +14,53 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show repo tree (debug)
+        run: |
+          pwd
+          ls -la
+          echo "---"
+          ls -la scripts || true
+          echo "---"
+          ls -la data || true
+          echo "---"
+          cat requirements.txt || true
+
+      # Если wheel для lxml недоступен, эти пакеты помогут собрать его из исходников:
+      - name: Install system deps for lxml (fallback)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-dev libxslt1-dev python3-dev build-essential
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install deps
+      - name: Install pip deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip freeze
 
-      - name: Build Excel
+      - name: Ensure data dir exists
+        run: mkdir -p data
+
+      - name: Build Excel (with retry)
         run: |
-          python scripts/build_settlements_excel.py --out data/settlements.xlsx
+          set -e
+          python scripts/build_settlements_excel.py --out data/settlements.xlsx || \
+          (echo "Retry after 10s..." && sleep 10 && python scripts/build_settlements_excel.py --out data/settlements.xlsx)
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Verify output
+        run: |
+          test -s data/settlements.xlsx
+          ls -lh data/settlements.xlsx
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -35,10 +68,12 @@ jobs:
           name: settlements
           path: data/settlements.xlsx
           if-no-files-found: error
-      
+
       - name: Commit file back to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: auto-build settlements.xlsx"
           branch: ${{ github.ref_name }}
           file_pattern: data/settlements.xlsx
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
