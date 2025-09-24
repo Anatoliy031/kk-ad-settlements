@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Собирает полный перечень населенных пунктов для:
- - Краснодарского края
- - Республики Адыгея
-и формирует Excel: Регион | Район | Населенный пункт.
+Полная выгрузка населённых пунктов:
+ - Краснодарский край
+ - Республика Адыгея
 
-Требования:
-  Python 3.9+
-  pip install -r requirements.txt
+Выход: Excel с колонками: Регион | Район | Населенный пункт
 
-Запуск локально:
-  python scripts/build_settlements_excel.py --out data/settlements.xlsx
+Источник: Wikipedia
+  - https://ru.wikipedia.org/wiki/Населённые_пункты_Краснодарского_края
+  - https://ru.wikipedia.org/wiki/Населённые_пункты_Адыгеи
 """
+
 import argparse
 import os
 import re
 from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -42,100 +42,80 @@ def load_html(url: str, html_dir: str | None) -> str:
     resp.encoding = "utf-8"
     return resp.text
 
-def normalize_unit_title(h_tag_text: str) -> str:
-    t = h_tag_text.strip()
-    t = re.sub(r'^[#\s]+', '', t)
-    return t
+def headline_for(node) -> str | None:
+    """Берёт ближайший предыдущий H3/H2; если есть span.mw-headline — используем его текст."""
+    h = node.find_previous(["h3", "h2"])
+    if not h:
+        return None
+    span = h.find("span", class_="mw-headline")
+    if span:
+        return span.get_text(strip=True)
+    return h.get_text(" ", strip=True)
 
-def extract_tables_by_h3(soup: BeautifulSoup):
-    """Возвращает список: (заголовок, [DataFrames], [ul_lists])."""
-    out = []
-    for h3 in soup.select("h3"):
-        title = h3.get_text(" ", strip=True)
-        dfs = []
-        ul_lists = []
-        node = h3
-        while True:
-            node = node.find_next_sibling()
-            if node is None:
-                break
-            if node.name in ("h2", "h3"):
-                break
-            if node.name == "table":
-                caption = ""
-                cap_el = node.find("caption")
-                if cap_el:
-                    caption = cap_el.get_text(" ", strip=True)
-                cond = "Список насел" in caption
-                if not cond:
-                    th = node.find("th")
-                    if th and ("Насел" in th.get_text() or "Название" in th.get_text() or "Наименование" in th.get_text()):
-                        cond = True
-                if cond:
-                    try:
-                        df = pd.read_html(str(node), flavor="lxml")[0]
-                        dfs.append(df)
-                    except Exception:
-                        pass
-            if node.name == "ul":
-                items = [li.get_text(" ", strip=True) for li in node.select(":scope > li")]
-                items = [re.sub(r"\[[^\]]*\]", "", it).strip() for it in items if len(it.strip()) > 0]
-                if items:
-                    ul_lists.append(items)
-        if dfs or ul_lists:
-            out.append((title, dfs, ul_lists))
-    return out
-
-def settle_column_name(candidates):
-    for c in candidates:
-        c_norm = str(c).lower().strip()
-        if "насел" in c_norm and "пункт" in c_norm:
+def choose_name_column(df: pd.DataFrame) -> str | None:
+    # Ищем колонку с названием НП
+    for c in map(str, df.columns):
+        lc = c.lower()
+        if ("насел" in lc and "пункт" in lc) or lc in ("населённый пункт", "населенный пункт"):
             return c
-        if c_norm in ("населённый пункт", "населенный пункт", "населённые пункты"):
+        if lc in ("название", "наименование"):
             return c
-        if c_norm in ("название", "наименование"):
+    for c in map(str, df.columns):
+        if "пункт" in c.lower() or "назв" in c.lower():
             return c
-    for c in candidates:
-        if "пункт" in str(c).lower() or "назв" in str(c).lower():
-            return c
+    # fallback: если вторая колонка похожа на имя (часто так)
+    if df.shape[1] >= 2:
+        return str(df.columns[1])
     return None
 
 def harvest_region(region_name: str, url: str, html_dir: str | None) -> pd.DataFrame:
     html = load_html(url, html_dir)
     soup = BeautifulSoup(html, "lxml")
-    pairs = extract_tables_by_h3(soup)
 
     rows = []
-    for h3_title, tables, ul_lists in pairs:
-        unit = normalize_unit_title(h3_title)
-        for df in tables:
-            col = settle_column_name(list(df.columns.astype(str)))
-            if col is None:
-                if df.shape[1] >= 2:
-                    col = df.columns[1]
-                else:
-                    continue
-            for val in df[col].astype(str).tolist():
-                name = val.strip()
-                if not name or name == "—":
-                    continue
-                name = re.sub(r"\[[^\]]*\]", "", name).strip()
-                rows.append({"Регион": region_name, "Район": unit, "Населенный пункт": name})
-        for items in ul_lists:
-            for name in items:
-                if not name or name == "—":
-                    continue
-                if len(name) > 100:
-                    continue
-                rows.append({"Регион": region_name, "Район": unit, "Населенный пункт": name})
+
+    # 1) Проходим все таблицы страницы; для каждой ищем колонку "населенный пункт"
+    for table in soup.select("table"):
+        try:
+            df = pd.read_html(str(table), flavor="lxml")[0]
+        except Exception:
+            continue
+
+        name_col = choose_name_column(df)
+        if not name_col:
+            continue  # это не "наша" таблица
+
+        unit = headline_for(table)
+        if not unit:
+            continue
+
+        # чистим и складываем строки
+        for raw in df[name_col].astype(str).tolist():
+            name = re.sub(r"\[[^\]]*\]", "", raw).strip()
+            if not name or name == "—":
+                continue
+            rows.append({"Регион": region_name, "Район": unit, "Населенный пункт": name})
+
+    # 2) На всякий — некоторые секции могут быть списками UL (редко)
+    for h in soup.select("h2, h3"):
+        unit = headline_for(h)  # по сути текст самого заголовка
+        ul = h.find_next_sibling("ul")
+        if not ul:
+            continue
+        items = [li.get_text(" ", strip=True) for li in ul.select(":scope > li")]
+        for raw in items:
+            name = re.sub(r"\[[^\]]*\]", "", raw).strip()
+            if not name or len(name) > 100:
+                continue
+            rows.append({"Регион": region_name, "Район": unit, "Населенный пункт": name})
 
     out = pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
     return out
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="data/settlements.xlsx", help="Путь к итоговому Excel")
-    ap.add_argument("--html-dir", default=None, help="Каталог с локально сохраненными HTML (офлайн режим)")
+    ap.add_argument("--out", default="data/settlements.xlsx")
+    ap.add_argument("--html-dir", default=None)
     args = ap.parse_args()
 
     frames = []
@@ -143,11 +123,26 @@ def main():
         df = harvest_region(region, url, args.html_dir)
         frames.append(df)
 
-    result = pd.concat(frames, ignore_index=True)
-    result["Район"] = result["Район"].str.replace(r"^\s*город-?курорт\s+", "", regex=True)
-    result["Район"] = result["Район"].str.replace(r"^\s*город\s+", "", regex=True)
-    result["Населенный пункт"] = result["Населенный пункт"].str.replace(r"\s+\(.*?\)$", "", regex=True)
+    if not frames or all(df.empty for df in frames):
+        raise RuntimeError("Парсер не нашёл таблиц с населёнными пунктами. Проверьте структуру страниц Wikipedia.")
 
+    result = pd.concat(frames, ignore_index=True)
+
+    # Нормализация «района/ГО»
+    result["Район"] = (
+        result["Район"]
+        .str.replace(r"^\s*город-?курорт\s+", "", regex=True)
+        .str.replace(r"^\s*город\s+", "", regex=True)
+        .str.replace(r"\s*\[.*?\]\s*", "", regex=True)
+        .str.strip()
+    )
+    # Уберём хвосты типа "(ГО)" в названии единицы
+    result["Район"] = result["Район"].str.replace(r"\s*\(.*?\)\s*$", "", regex=True).str.strip()
+
+    # Имя — без скобок с примечаниями
+    result["Населенный пункт"] = result["Населенный пункт"].str.replace(r"\s+\(.*?\)$", "", regex=True).str.strip()
+
+    # Сортировка
     result.sort_values(by=["Регион", "Район", "Населенный пункт"], inplace=True, key=lambda s: s.str.lower())
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
