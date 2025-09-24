@@ -1,0 +1,44 @@
+name: Build Settlements Excel
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # еженедельно по понедельникам 03:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Excel
+        run: |
+          python scripts/build_settlements_excel.py --out data/settlements.xlsx
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: settlements
+          path: data/settlements.xlsx
+          if-no-files-found: error
+      
+      - name: Commit file back to repo
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: auto-build settlements.xlsx"
+          branch: ${{ github.ref_name }}
+          file_pattern: data/settlements.xlsx
